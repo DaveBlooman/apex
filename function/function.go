@@ -18,6 +18,7 @@ import (
 	"github.com/apex/log"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/service/kms"
 	"github.com/aws/aws-sdk-go/service/lambda"
 	"github.com/aws/aws-sdk-go/service/lambda/lambdaiface"
 	"github.com/dustin/go-humanize"
@@ -95,6 +96,7 @@ type Config struct {
 	Hooks            hooks.Hooks       `json:"hooks"`
 	RetainedVersions *int              `json:"retainedVersions"`
 	VPC              vpc.VPC           `json:"vpc"`
+	EncryptedVars    bool              `json:"encrypted_vars"`
 }
 
 // Function represents a Lambda function, with configuration loaded
@@ -105,6 +107,7 @@ type Function struct {
 	FunctionName string
 	Path         string
 	Service      lambdaiface.LambdaAPI
+	Encrypt      kms.KMS
 	Log          log.Interface
 	IgnoreFile   []byte
 	Plugins      []string
@@ -728,6 +731,11 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Environment []string
 	}
 
+	environmentVars, err := environ(f.environment().Variables, f.Encrypt, true)
+	if err != nil {
+		panic(err)
+	}
+
 	localConfig := &diffConfig{
 		Description: f.Description,
 		Memory:      f.Memory,
@@ -735,7 +743,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Role:        f.Role,
 		Runtime:     f.Runtime,
 		Handler:     f.Handler,
-		Environment: environ(f.environment().Variables),
+		Environment: environmentVars,
 		VPC: vpc.VPC{
 			Subnets:        f.VPC.Subnets,
 			SecurityGroups: f.VPC.SecurityGroups,
@@ -751,8 +759,13 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Handler:     *config.Configuration.Handler,
 	}
 
+	remoteEnvironmentVars, err := environ(config.Configuration.Environment.Variables, f.Encrypt, false)
+	if err != nil {
+		panic(err)
+	}
+
 	if config.Configuration.Environment != nil {
-		remoteConfig.Environment = environ(config.Configuration.Environment.Variables)
+		remoteConfig.Environment = remoteEnvironmentVars
 	}
 
 	// SDK is inconsistent here. VpcConfig can be nil or empty struct.
@@ -825,6 +838,7 @@ func (f *Function) hookDeploy() error {
 
 // environment for lambda calls.
 func (f *Function) environment() *lambda.Environment {
+
 	env := make(map[string]*string)
 	for k, v := range f.Environment {
 		env[k] = aws.String(v)
@@ -833,7 +847,7 @@ func (f *Function) environment() *lambda.Environment {
 }
 
 // environment sorted and joined.
-func environ(env map[string]*string) []string {
+func environ(env map[string]*string, service kms.KMS, encrypt bool) ([]string, error) {
 	var keys []string
 	var pairs []string
 
@@ -843,9 +857,39 @@ func environ(env map[string]*string) []string {
 
 	sort.Strings(keys)
 
+	if encrypt {
+
+		for i, p := range pairs {
+
+			params := &kms.EncryptInput{
+				KeyId:     aws.String("df3f9bda-c7dc-4730-92ae-c33c071adf9b"),
+				Plaintext: []byte(p),
+			}
+
+			resp, err := service.Encrypt(params)
+
+			if err != nil {
+				return nil, err
+			}
+
+			pairs[i] = base64.StdEncoding.EncodeToString(resp.CiphertextBlob)
+
+		}
+
+	}
+
 	for _, k := range keys {
 		pairs = append(pairs, fmt.Sprintf("%s=%s", k, *env[k]))
 	}
 
-	return pairs
+	return pairs, nil
+}
+
+func encrypt(foo []string) []string {
+
+	for _, item := range foo {
+		fmt.Println(item)
+	}
+
+	return foo
 }
