@@ -97,6 +97,7 @@ type Config struct {
 	RetainedVersions *int              `json:"retainedVersions"`
 	VPC              vpc.VPC           `json:"vpc"`
 	EncryptedVars    bool              `json:"encrypted_vars"`
+	KeyID            string            `json:"key_id"`
 }
 
 // Function represents a Lambda function, with configuration loaded
@@ -731,7 +732,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Environment []string
 	}
 
-	environmentVars, err := environ(f.environment().Variables, f.Encrypt, true)
+	environmentVars, err := environ(f.environment().Variables, f)
 	if err != nil {
 		panic(err)
 	}
@@ -759,7 +760,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Handler:     *config.Configuration.Handler,
 	}
 
-	remoteEnvironmentVars, err := environ(config.Configuration.Environment.Variables, f.Encrypt, false)
+	remoteEnvironmentVars, err := environ(config.Configuration.Environment.Variables, f)
 	if err != nil {
 		panic(err)
 	}
@@ -847,7 +848,7 @@ func (f *Function) environment() *lambda.Environment {
 }
 
 // environment sorted and joined.
-func environ(env map[string]*string, service kms.KMS, encrypt bool) ([]string, error) {
+func environ(env map[string]*string, service *Function) ([]string, error) {
 	var keys []string
 	var pairs []string
 
@@ -857,24 +858,37 @@ func environ(env map[string]*string, service kms.KMS, encrypt bool) ([]string, e
 
 	sort.Strings(keys)
 
-	if encrypt {
+	for _, k := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, *env[k]))
+	}
 
-		for i, p := range pairs {
+	return pairs, nil
+}
 
-			params := &kms.EncryptInput{
-				KeyId:     aws.String("df3f9bda-c7dc-4730-92ae-c33c071adf9b"),
-				Plaintext: []byte(p),
-			}
+func encryptEnviron(env map[string]*string, service *Function) ([]string, error) {
+	var keys []string
+	var pairs []string
 
-			resp, err := service.Encrypt(params)
+	for k := range env {
+		keys = append(keys, k)
+	}
 
-			if err != nil {
-				return nil, err
-			}
+	sort.Strings(keys)
 
-			pairs[i] = base64.StdEncoding.EncodeToString(resp.CiphertextBlob)
+	for i, p := range pairs {
 
+		params := &kms.EncryptInput{
+			KeyId:     aws.String(service.KeyID),
+			Plaintext: []byte(p),
 		}
+
+		resp, err := service.Encrypt.Encrypt(params)
+
+		if err != nil {
+			return nil, err
+		}
+
+		pairs[i] = base64.StdEncoding.EncodeToString(resp.CiphertextBlob)
 
 	}
 
@@ -883,13 +897,4 @@ func environ(env map[string]*string, service kms.KMS, encrypt bool) ([]string, e
 	}
 
 	return pairs, nil
-}
-
-func encrypt(foo []string) []string {
-
-	for _, item := range foo {
-		fmt.Println(item)
-	}
-
-	return foo
 }
