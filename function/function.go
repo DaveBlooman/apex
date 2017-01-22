@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ type Config struct {
 	VPC              vpc.VPC           `json:"vpc"`
 	EncryptedVars    bool              `json:"encrypted_vars"`
 	KeyID            string            `json:"key_id"`
+	Variables        *lambda.Environment
 }
 
 // Function represents a Lambda function, with configuration loaded
@@ -108,7 +110,7 @@ type Function struct {
 	FunctionName string
 	Path         string
 	Service      lambdaiface.LambdaAPI
-	Encrypt      kms.KMS
+	KMS          *kms.KMS
 	Log          log.Interface
 	IgnoreFile   []byte
 	Plugins      []string
@@ -252,6 +254,12 @@ func (f *Function) Deploy() error {
 		return err
 	}
 
+	if f.EncryptedVars {
+		f.Variables = f.encryptEnvironment()
+	} else {
+		f.Variables = f.environment()
+	}
+
 	if f.configChanged(config) {
 		f.Log.Debug("config changed")
 		return f.DeployConfigAndCode(zip)
@@ -291,7 +299,7 @@ func (f *Function) DeployConfigAndCode(zip []byte) error {
 		Role:         &f.Role,
 		Runtime:      &f.Runtime,
 		Handler:      &f.Handler,
-		Environment:  f.environment(),
+		Environment:  f.Variables,
 		VpcConfig: &lambda.VpcConfig{
 			SecurityGroupIds: aws.StringSlice(f.VPC.SecurityGroups),
 			SubnetIds:        aws.StringSlice(f.VPC.Subnets),
@@ -382,7 +390,7 @@ func (f *Function) Create(zip []byte) error {
 		Handler:      &f.Handler,
 		Role:         &f.Role,
 		Publish:      aws.Bool(true),
-		Environment:  f.environment(),
+		Environment:  f.Variables,
 		Code: &lambda.FunctionCode{
 			ZipFile: zip,
 		},
@@ -732,11 +740,6 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Environment []string
 	}
 
-	environmentVars, err := environ(f.environment().Variables, f)
-	if err != nil {
-		panic(err)
-	}
-
 	localConfig := &diffConfig{
 		Description: f.Description,
 		Memory:      f.Memory,
@@ -744,7 +747,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Role:        f.Role,
 		Runtime:     f.Runtime,
 		Handler:     f.Handler,
-		Environment: environmentVars,
+		Environment: environ(f.environment().Variables),
 		VPC: vpc.VPC{
 			Subnets:        f.VPC.Subnets,
 			SecurityGroups: f.VPC.SecurityGroups,
@@ -760,13 +763,21 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Handler:     *config.Configuration.Handler,
 	}
 
-	remoteEnvironmentVars, err := environ(config.Configuration.Environment.Variables, f)
-	if err != nil {
-		panic(err)
+	var remoteEnvironmentVars []string
+	if f.EncryptedVars {
+		vars, err := decryptEnvs(config.Configuration.Environment.Variables, f)
+		if err != nil {
+			panic(err)
+		}
+		remoteEnvironmentVars = vars
 	}
 
 	if config.Configuration.Environment != nil {
-		remoteConfig.Environment = remoteEnvironmentVars
+		if f.EncryptedVars {
+			remoteConfig.Environment = remoteEnvironmentVars
+		} else {
+			remoteConfig.Environment = environ(config.Configuration.Environment.Variables)
+		}
 	}
 
 	// SDK is inconsistent here. VpcConfig can be nil or empty struct.
@@ -786,6 +797,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 
 	localConfigJSON, _ := json.Marshal(localConfig)
 	remoteConfigJSON, _ := json.Marshal(remoteConfig)
+
 	return string(localConfigJSON) != string(remoteConfigJSON)
 }
 
@@ -839,7 +851,6 @@ func (f *Function) hookDeploy() error {
 
 // environment for lambda calls.
 func (f *Function) environment() *lambda.Environment {
-
 	env := make(map[string]*string)
 	for k, v := range f.Environment {
 		env[k] = aws.String(v)
@@ -847,8 +858,27 @@ func (f *Function) environment() *lambda.Environment {
 	return &lambda.Environment{Variables: env}
 }
 
+func (f *Function) encryptEnvironment() *lambda.Environment {
+	env := make(map[string]*string)
+	for k, v := range f.Environment {
+		params := &kms.EncryptInput{
+			KeyId:     aws.String(f.KeyID),
+			Plaintext: []byte(v),
+		}
+
+		resp, err := f.KMS.Encrypt(params)
+		if err != nil {
+			fmt.Println(err.Error())
+			panic(err)
+		}
+		env[k] = aws.String(base64.StdEncoding.EncodeToString(resp.CiphertextBlob))
+	}
+
+	return &lambda.Environment{Variables: env}
+}
+
 // environment sorted and joined.
-func environ(env map[string]*string, service *Function) ([]string, error) {
+func environ(env map[string]*string) []string {
 	var keys []string
 	var pairs []string
 
@@ -862,10 +892,11 @@ func environ(env map[string]*string, service *Function) ([]string, error) {
 		pairs = append(pairs, fmt.Sprintf("%s=%s", k, *env[k]))
 	}
 
-	return pairs, nil
+	return pairs
 }
 
-func encryptEnviron(env map[string]*string, service *Function) ([]string, error) {
+func decryptEnvs(env map[string]*string, service *Function) ([]string, error) {
+
 	var keys []string
 	var pairs []string
 
@@ -875,20 +906,31 @@ func encryptEnviron(env map[string]*string, service *Function) ([]string, error)
 
 	sort.Strings(keys)
 
-	for i, p := range pairs {
+	for _, k := range keys {
 
-		params := &kms.EncryptInput{
-			KeyId:     aws.String(service.KeyID),
-			Plaintext: []byte(p),
+		// This will not decrypt if the var is not base64 encoded
+		scheme := regexp.MustCompile("^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$")
+		if !scheme.MatchString(*env[k]) {
+			continue
 		}
 
-		resp, err := service.Encrypt.Encrypt(params)
+		decryptBlob, err := base64.StdEncoding.DecodeString(*env[k])
+		if err != nil {
+			fmt.Println(err)
+			panic(err)
+		}
+
+		decryptparams := &kms.DecryptInput{
+			CiphertextBlob: []byte(decryptBlob),
+		}
+
+		decryptResp, err := service.KMS.Decrypt(decryptparams)
 
 		if err != nil {
 			return nil, err
 		}
 
-		pairs[i] = base64.StdEncoding.EncodeToString(resp.CiphertextBlob)
+		*env[k] = string(decryptResp.Plaintext)
 
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/apex/log"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/service/kms"
 	"github.com/aws/aws-sdk-go/service/lambda/lambdaiface"
 	"github.com/tj/go-sync/semaphore"
 	"gopkg.in/validator.v2"
@@ -67,6 +68,7 @@ type Project struct {
 	InfraEnvironment string
 	Log              log.Interface
 	Service          lambdaiface.LambdaAPI
+	KMS              *kms.KMS
 	Functions        []*function.Function
 	IgnoreFile       []byte
 	nameTemplate     *template.Template
@@ -352,6 +354,7 @@ func (p *Project) LoadFunctionByPath(name, path string) (*function.Function, err
 		Name:       name,
 		Path:       path,
 		Service:    p.Service,
+		KMS:        p.KMS,
 		Log:        p.Log,
 		IgnoreFile: p.IgnoreFile,
 		Alias:      p.Alias,
@@ -368,43 +371,6 @@ func (p *Project) LoadFunctionByPath(name, path string) (*function.Function, err
 	}
 
 	return fn, nil
-}
-
-// CreateOrUpdateAlias ensures the given `alias` is available for `version`.
-func (p *Project) CreateOrUpdateAlias(alias, version string) error {
-	p.Log.Debugf("updating %d functions", len(p.Functions))
-
-	sem := make(semaphore.Semaphore, p.Concurrency)
-	errs := make(chan error)
-
-	go func() {
-		for _, fn := range p.Functions {
-			fn := fn
-			sem.Acquire()
-
-			go func() {
-				defer sem.Release()
-
-				err := fn.CreateOrUpdateAlias(alias, version)
-				if err != nil {
-					err = fmt.Errorf("function %s: %s", fn.Name, err)
-				}
-
-				errs <- err
-			}()
-		}
-
-		sem.Wait()
-		close(errs)
-	}()
-
-	for err := range errs {
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // name returns the computed name for `fn`, using the nameTemplate.

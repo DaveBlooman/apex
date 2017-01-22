@@ -6,6 +6,7 @@ import (
 	"github.com/apex/log"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
 	"github.com/aws/aws-sdk-go/service/lambda"
 	"github.com/pkg/errors"
 	"github.com/tj/cobra"
@@ -163,6 +164,7 @@ func Prepare(c *cobra.Command, args []string) error {
 		Project.Concurrency = 1
 	} else {
 		Project.Service = lambda.New(Session)
+		Project.KMS = kms.New(Session)
 	}
 
 	if chdir != "" {
