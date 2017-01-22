@@ -97,14 +97,11 @@ type Config struct {
 	Hooks            hooks.Hooks       `json:"hooks"`
 	RetainedVersions *int              `json:"retainedVersions"`
 	VPC              vpc.VPC           `json:"vpc"`
-<<<<<<< HEAD
 	EncryptedVars    bool              `json:"encrypted_vars"`
 	KeyID            string            `json:"key_id"`
-	Variables        *lambda.Environment
-=======
 	KMSKeyArn        string            `json:"kms_arn"`
 	DeadLetterARN    string            `json:"deadletter_arn"`
->>>>>>> upstream/master
+	Variables        *lambda.Environment
 }
 
 // Function represents a Lambda function, with configuration loaded
@@ -304,12 +301,8 @@ func (f *Function) DeployConfigAndCode(zip []byte) error {
 		Role:         &f.Role,
 		Runtime:      &f.Runtime,
 		Handler:      &f.Handler,
-<<<<<<< HEAD
-		Environment:  f.Variables,
-=======
 		KMSKeyArn:    &f.KMSKeyArn,
 		Environment:  f.environment(),
->>>>>>> upstream/master
 		VpcConfig: &lambda.VpcConfig{
 			SecurityGroupIds: aws.StringSlice(f.VPC.SecurityGroups),
 			SubnetIds:        aws.StringSlice(f.VPC.Subnets),
@@ -827,7 +820,6 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 
 	localConfigJSON, _ := json.Marshal(localConfig)
 	remoteConfigJSON, _ := json.Marshal(remoteConfig)
-
 	return string(localConfigJSON) != string(remoteConfigJSON)
 }
 
@@ -937,31 +929,24 @@ func decryptEnvs(env map[string]*string, service *Function) ([]string, error) {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-
 		// This will not decrypt if the var is not base64 encoded
 		scheme := regexp.MustCompile("^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$")
 		if !scheme.MatchString(*env[k]) {
 			continue
 		}
-
 		decryptBlob, err := base64.StdEncoding.DecodeString(*env[k])
 		if err != nil {
 			fmt.Println(err)
 			panic(err)
 		}
-
 		decryptparams := &kms.DecryptInput{
 			CiphertextBlob: []byte(decryptBlob),
 		}
-
 		decryptResp, err := service.KMS.Decrypt(decryptparams)
-
 		if err != nil {
 			return nil, err
 		}
-
 		*env[k] = string(decryptResp.Plaintext)
-
 	}
 
 	for _, k := range keys {
