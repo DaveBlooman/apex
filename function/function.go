@@ -97,9 +97,14 @@ type Config struct {
 	Hooks            hooks.Hooks       `json:"hooks"`
 	RetainedVersions *int              `json:"retainedVersions"`
 	VPC              vpc.VPC           `json:"vpc"`
+<<<<<<< HEAD
 	EncryptedVars    bool              `json:"encrypted_vars"`
 	KeyID            string            `json:"key_id"`
 	Variables        *lambda.Environment
+=======
+	KMSKeyArn        string            `json:"kms_arn"`
+	DeadLetterARN    string            `json:"deadletter_arn"`
+>>>>>>> upstream/master
 }
 
 // Function represents a Lambda function, with configuration loaded
@@ -299,10 +304,18 @@ func (f *Function) DeployConfigAndCode(zip []byte) error {
 		Role:         &f.Role,
 		Runtime:      &f.Runtime,
 		Handler:      &f.Handler,
+<<<<<<< HEAD
 		Environment:  f.Variables,
+=======
+		KMSKeyArn:    &f.KMSKeyArn,
+		Environment:  f.environment(),
+>>>>>>> upstream/master
 		VpcConfig: &lambda.VpcConfig{
 			SecurityGroupIds: aws.StringSlice(f.VPC.SecurityGroups),
 			SubnetIds:        aws.StringSlice(f.VPC.Subnets),
+		},
+		DeadLetterConfig: &lambda.DeadLetterConfig{
+			TargetArn: &f.DeadLetterARN,
 		},
 	})
 
@@ -389,6 +402,7 @@ func (f *Function) Create(zip []byte) error {
 		Runtime:      &f.Runtime,
 		Handler:      &f.Handler,
 		Role:         &f.Role,
+		KMSKeyArn:    &f.KMSKeyArn,
 		Publish:      aws.Bool(true),
 		Environment:  f.Variables,
 		Code: &lambda.FunctionCode{
@@ -397,6 +411,9 @@ func (f *Function) Create(zip []byte) error {
 		VpcConfig: &lambda.VpcConfig{
 			SecurityGroupIds: aws.StringSlice(f.VPC.SecurityGroups),
 			SubnetIds:        aws.StringSlice(f.VPC.Subnets),
+		},
+		DeadLetterConfig: &lambda.DeadLetterConfig{
+			TargetArn: &f.DeadLetterARN,
 		},
 	})
 
@@ -730,14 +747,16 @@ func (f *Function) currentVersionAlias() (*lambda.AliasConfiguration, error) {
 // configChanged checks if function configuration differs from configuration stored in AWS Lambda
 func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 	type diffConfig struct {
-		Description string
-		Memory      int64
-		Timeout     int64
-		Role        string
-		Runtime     string
-		Handler     string
-		VPC         vpc.VPC
-		Environment []string
+		Description      string
+		Memory           int64
+		Timeout          int64
+		Role             string
+		Runtime          string
+		Handler          string
+		VPC              vpc.VPC
+		Environment      []string
+		KMSKeyArn        string
+		DeadLetterConfig lambda.DeadLetterConfig
 	}
 
 	localConfig := &diffConfig{
@@ -747,10 +766,14 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Role:        f.Role,
 		Runtime:     f.Runtime,
 		Handler:     f.Handler,
+		KMSKeyArn:   f.KMSKeyArn,
 		Environment: environ(f.environment().Variables),
 		VPC: vpc.VPC{
 			Subnets:        f.VPC.Subnets,
 			SecurityGroups: f.VPC.SecurityGroups,
+		},
+		DeadLetterConfig: lambda.DeadLetterConfig{
+			TargetArn: &f.DeadLetterARN,
 		},
 	}
 
@@ -761,6 +784,7 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 		Role:        *config.Configuration.Role,
 		Runtime:     *config.Configuration.Runtime,
 		Handler:     *config.Configuration.Handler,
+		KMSKeyArn:   *config.Configuration.KMSKeyArn,
 	}
 
 	var remoteEnvironmentVars []string
@@ -777,6 +801,12 @@ func (f *Function) configChanged(config *lambda.GetFunctionOutput) bool {
 			remoteConfig.Environment = remoteEnvironmentVars
 		} else {
 			remoteConfig.Environment = environ(config.Configuration.Environment.Variables)
+		}
+	}
+
+	if config.Configuration.DeadLetterConfig != nil {
+		remoteConfig.DeadLetterConfig = lambda.DeadLetterConfig{
+			TargetArn: config.Configuration.DeadLetterConfig.TargetArn,
 		}
 	}
 
